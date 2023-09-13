@@ -8,25 +8,57 @@
 #include <chrono>
 using namespace std::chrono;
 
-__global__ void asyncMandel(CudaArgs* args, double width, double height, double xmin, double ymin, unsigned long* result)
+#define THR 24
+
+__global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result)
 {
     unsigned long n;
     double p, q, r, i, prev_r, prev_i;
 
     unsigned long cols[4];
 
-    int ni = blockIdx.x * blockDim.x + threadIdx.x;
-    int nj = blockIdx.y * blockDim.y + threadIdx.y;
+    int ni;
+    int nj;
+    
+    if (border == 0)
+    {        
+        switch (threadIdx.y)
+        {
+        case 0:
+            ni = blockIdx.x * THR + threadIdx.x;
+            nj = blockIdx.y * THR;
+            break;
+        case 1:
+            ni = blockIdx.x * THR;
+            nj = blockIdx.y * THR + THR - 1 - threadIdx.x;
+            break;
+        }
+    }
+    else if (border == 1)
+    {
+        if (result[(blockIdx.y * THR + 1) * args->scrwidth + blockIdx.x * THR + 1] != 0xFFFFFF)
+        {
+            return;
+        }
+        ni = blockIdx.x * THR + threadIdx.x + 1;
+        nj = blockIdx.y * THR + threadIdx.y + 1;
+    }
+    else if (border == 2)
+    {
+        ni = blockIdx.x * THR + threadIdx.x;
+        nj = blockIdx.y * THR + threadIdx.y;
+    }
 
     int colno = 0;
-    for (int x = 0; x <= args->aa; ++x)
+    bool allBlack = true;
+    int aa = args->aa == 1 ? 1 : (args->aa == 2 && args->last ? 1 : 0);
+    for (int x = 0; x <= aa % 2; ++x)
     {
-        p = (((double)ni + x / 2.0f) * width / args->scrwidth) + xmin;
+        p = (((double)ni + x / 2.0f) * args->width / args->scrwidth) + args->xmin;
 
-        for (int y = 0; y <= args->aa; ++y)
+        for (int y = 0; y <= aa; ++y)
         {
-
-            q = (((double)nj + y / 2.0f) * height / args->scrheight) + ymin;
+            q = (((double)nj + y / 2.0f) * args->height / args->scrheight) + args->ymin;
 
             prev_i = 0.0f;
             prev_r = 0.0f;
@@ -49,6 +81,8 @@ __global__ void asyncMandel(CudaArgs* args, double width, double height, double 
 
             if (n < args->iterations)
             {
+                allBlack = false;
+
                 n = n % 128;
 
                 if (n < 32)
@@ -72,7 +106,7 @@ __global__ void asyncMandel(CudaArgs* args, double width, double height, double 
         }
     }
 
-    if (args->aa)
+    if (aa)
     {
         result[args->scrwidth * nj + ni] =
             ((((cols[0] & 0xff0000) + (cols[1] & 0xff0000) + (cols[2] & 0xff0000) + (cols[3] & 0xff0000)) / 4) & 0xff0000) |
@@ -83,10 +117,22 @@ __global__ void asyncMandel(CudaArgs* args, double width, double height, double 
     {
         result[args->scrwidth * nj + ni] = cols[0];
     }
+
+    if (border == 0 && !allBlack)
+    {        
+        result[(blockIdx.y * THR + 1) * args->scrwidth + blockIdx.x * THR + 1] = 0xFFFFFF;
+        if (threadIdx.y == 0 && blockIdx.y > 0)
+        {
+            result[((blockIdx.y - 1) * THR + 1) * args->scrwidth + blockIdx.x * THR + 1] = 0xFFFFFF;
+        }
+        if (threadIdx.y == 1 && blockIdx.x > 0)
+        {
+            result[(blockIdx.y * THR + 1) * args->scrwidth + (blockIdx.x - 1) * THR + 1] = 0xFFFFFF;
+        }
+    }
 }
 
-void cudaMandel(CudaArgs *args, double xmin, double xmax, double ymin, double ymax,
-    unsigned char* lpBitmapBits)
+void cudaMandel(CudaArgs *args, unsigned char* lpBitmapBits)
 {
     auto t1 = high_resolution_clock::now();
 
@@ -94,6 +140,7 @@ void cudaMandel(CudaArgs *args, double xmin, double xmax, double ymin, double ym
     unsigned long* cudaResult = 0;
 
     cudaMalloc(&cudaResult, outputSize);
+    //cudaMemset(&cudaResult, 0, outputSize);
 
     int numBytes = sizeof(CudaArgs);
 
@@ -101,11 +148,26 @@ void cudaMandel(CudaArgs *args, double xmin, double xmax, double ymin, double ym
     cudaMalloc((void**)&gpuArgs, numBytes);
     cudaMemcpy(gpuArgs, args, numBytes, cudaMemcpyHostToDevice);
 
-    dim3 threadsPerBlock(16, 16);
-    dim3 numBlocks(args->scrwidth / threadsPerBlock.x, args->scrheight / threadsPerBlock.y);
+    dim3 numBlocks(args->scrwidth / THR, args->scrheight / THR);
 
-    // Execute kernel
-    asyncMandel <<< numBlocks, threadsPerBlock >>> (gpuArgs, (xmax - xmin), (ymax - ymin), xmin, ymin, cudaResult);
+    if (!args->slow)
+    {
+        // Execute kernel
+        dim3 threadsPerBlock0(THR, 2);
+        asyncMandel <<< numBlocks, threadsPerBlock0 >> > (gpuArgs, 0, cudaResult);
+
+        // Execute kernel2
+        dim3 threadsPerBlock1(THR - 1, THR - 1);
+        asyncMandel <<< numBlocks, threadsPerBlock1 >> > (gpuArgs, 1, cudaResult);
+    }
+    else
+    {
+        // Execute kernel2
+        dim3 threadsPerBlock2(THR, THR);
+        asyncMandel <<< numBlocks, threadsPerBlock2 >>> (gpuArgs, 2, cudaResult);
+    }
+
+
     cudaMemcpy(lpBitmapBits, cudaResult, outputSize, cudaMemcpyDeviceToHost);
 
     cudaFree(cudaResult);

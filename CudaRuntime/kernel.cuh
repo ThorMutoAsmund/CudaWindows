@@ -12,8 +12,13 @@ typedef struct
     int scrheight;
     int aa;
     int iterations;
+    int slow;
+    double width;
+    double height;
+    double xmin;
+    double ymin;
+    int last;
 } CudaArgs;
 
 
-void cudaMandel(CudaArgs *args, double xmin, double xmax, double ymin, double ymax, 
-    unsigned char* lpBitmapBits);
+void cudaMandel(CudaArgs *args, unsigned char* lpBitmapBits);

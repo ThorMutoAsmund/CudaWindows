@@ -4,7 +4,6 @@ using namespace std;
 
 #define WIDTH 1024
 #define HEIGHT 1024
-//#define MAX_ITERATIONS 1024
 
 // Tutorials
 // http://www.winprog.org/tutorial/bitmaps.html
@@ -15,12 +14,15 @@ void render(HWND hwnd);
 
 BITMAPINFO bi;
 HBITMAP bitmap;
+HDC hDCMem;
 unsigned char* lpBitmapBits;
 double xmin = -2.10, xmax = 0.85, ymin = -1.5, ymax = 1.5;
 int zoom = 0;
 bool turbo = false;
 int xPos;
 int yPos;
+bool last = true;
+bool ready = false;
 
 CudaArgs cpuArgs;
 
@@ -32,51 +34,53 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         initDIBS(hwnd);
         render(hwnd);
-        SetTimer(hwnd, 1, 1000/30, NULL);
+        SetTimer(hwnd, 1, 1000/100, NULL);
     }
     break;
 
     case WM_TIMER:
     {
-        if (zoom != 0)
+        if ((zoom != 0 || last) && ready)
         {
-            double fac = turbo ? 0.9 : 0.96;
-            fac = zoom < 0 ? 1.0 / fac : fac;
-            double newWidth = (xmax - xmin) * fac;
-            double newHeight = (ymax - ymin) * fac;
+            if (zoom)
+            {
+                double fac = turbo ? 0.9 : 0.96;
+                fac = zoom < 0 ? 1.0 / fac : fac;
+                double newWidth = (xmax - xmin) * fac;
+                double newHeight = (ymax - ymin) * fac;
 
-            double c = (double)xPos / WIDTH;
-            xmin = xmin * (1.0 - c) + xmax * c - (c * newWidth);
-            xmax = xmin + newWidth;
+                double c = (double)xPos / WIDTH;
+                xmin = xmin * (1.0 - c) + xmax * c - (c * newWidth);
+                xmax = xmin + newWidth;
 
-            c = (double)yPos / HEIGHT;
-            ymin = ymin * (1.0 - c) + ymax * c - (c * newHeight);
-            ymax = ymin + newHeight;
+                c = (double)yPos / HEIGHT;
+                ymin = ymin * (1.0 - c) + ymax * c - (c * newHeight);
+                ymax = ymin + newHeight;
+            }
  
+            ready = false;
             render(hwnd);
+
             InvalidateRect(hwnd, NULL, true);
+
+            last = false;
         }
     }
     break;
 
     case WM_PAINT:
     {
-        BITMAP bm;
         PAINTSTRUCT ps;
-
         HDC hdc = BeginPaint(hwnd, &ps);
 
-        HDC hdcMem = CreateCompatibleDC(hdc);
-        auto hbmOld = SelectObject(hdcMem, bitmap);
+        BITMAP bm;
+        auto hbmOld = SelectObject(hDCMem, bitmap);
 
         GetObject(bitmap, sizeof(bm), &bm);
-
-        BitBlt(hdc, 0, 0, bm.bmWidth, bm.bmHeight, hdcMem, 0, 0, SRCCOPY);
-
-        SelectObject(hdcMem, hbmOld);
-        DeleteDC(hdcMem);
+        BitBlt(hdc, 0, 0, bm.bmWidth, bm.bmHeight, hDCMem, 0, 0, SRCCOPY);
 
         EndPaint(hwnd, &ps);
+        ready = true;
     }
     break;
 
@@ -91,6 +95,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_RBUTTONUP:
     {
         zoom = 0;
+        last = true;
     }
     break;
 
@@ -105,21 +110,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         if (wParam == 0x41)
         {
-            cpuArgs.aa = 1 - cpuArgs.aa;
+            cpuArgs.aa = cpuArgs.aa == 0 ? 1 : (cpuArgs.aa == 1 ? 2 : 0);
+            last = true;
             render(hwnd);
+            last = false;
             InvalidateRect(hwnd, NULL, true);
         }
-        if (wParam == 0x49)
+        else if (wParam == 0x42)
         {
-            if (turbo && cpuArgs.iterations > 4)
-            {
-                cpuArgs.iterations /= 2;
-            }
-            else if (!turbo && cpuArgs.iterations < 4096)
-            {
-                cpuArgs.iterations *= 2;
-            }
+            cpuArgs.slow = 1 - cpuArgs.slow;
+            last = true;
             render(hwnd);
+            last = false;
+            InvalidateRect(hwnd, NULL, true);
+        }
+        else if (wParam == 0x49)
+        {
+            if (turbo && cpuArgs.iterations > 256)
+            {
+                cpuArgs.iterations -= 256;
+            }
+            else if (!turbo)
+            {
+                cpuArgs.iterations += 256;
+            }
+            last = true;
+            render(hwnd);
+            last = false;
             InvalidateRect(hwnd, NULL, true);
         }
         else if (wParam == VK_SHIFT)
@@ -142,6 +159,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_CLOSE:
     {
+        DeleteDC(hDCMem);
+        DeleteObject(bitmap);
         DestroyWindow(hwnd);
     }
     break;
@@ -164,7 +183,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 {
     cpuArgs.scrheight = HEIGHT;
     cpuArgs.scrwidth = WIDTH;
-    cpuArgs.aa = true;
+    cpuArgs.aa = 2;
     cpuArgs.iterations = 512;
 
     cudaDeviceProp prop;
@@ -237,9 +256,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 void initDIBS(HWND hwnd)
 {
     HDC hdc = GetDC(hwnd);
-    //HDC hDCMem = CreateCompatibleDC(hdc);
+    hDCMem = CreateCompatibleDC(hdc);
+    bitmap = ::CreateDIBSection(hDCMem, &bi, DIB_RGB_COLORS, (VOID**)&lpBitmapBits, NULL, 0);
 
-    bitmap = ::CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, (VOID**)&lpBitmapBits, NULL, 0);
+    //memset(lpBitmapBits, 0, WIDTH * HEIGHT * sizeof(long));
 
     //DeleteDC(hDCMem);
     ReleaseDC(hwnd, hdc);
@@ -247,7 +267,13 @@ void initDIBS(HWND hwnd)
 
 void render(HWND hwnd)
 {
-    cudaMandel(&cpuArgs, xmin, xmax, ymin, ymax, lpBitmapBits);
+    cpuArgs.width = (xmax - xmin);
+    cpuArgs.height = (ymax - ymin);
+    cpuArgs.xmin = xmin;
+    cpuArgs.ymin = ymin;
+    cpuArgs.last = last ? 1 : 0;
+
+    cudaMandel(&cpuArgs, lpBitmapBits);
 }
 
 
