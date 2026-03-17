@@ -2,8 +2,8 @@
 
 using namespace std;
 
-#define WIDTH 1024
-#define HEIGHT 1024
+#define WIDTH 2048
+#define HEIGHT 2048
 
 // Tutorials
 // http://www.winprog.org/tutorial/bitmaps.html
@@ -61,7 +61,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             ready = false;
             render(hwnd);
 
-            InvalidateRect(hwnd, NULL, true);
+            InvalidateRect(hwnd, NULL, false);
 
             last = false;
         }
@@ -81,6 +81,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         EndPaint(hwnd, &ps);
         ready = true;
+    }
+    break;
+
+    case WM_ERASEBKGND:
+    {
+        // Prevent default class brush erase to avoid white flash between frames.
+        return 1;
     }
     break;
 
@@ -114,7 +121,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             last = true;
             render(hwnd);
             last = false;
-            InvalidateRect(hwnd, NULL, true);
+            InvalidateRect(hwnd, NULL, false);
         }
         else if (wParam == 0x42)
         {
@@ -122,7 +129,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             last = true;
             render(hwnd);
             last = false;
-            InvalidateRect(hwnd, NULL, true);
+            InvalidateRect(hwnd, NULL, false);
         }
         else if (wParam == 0x49)
         {
@@ -137,7 +144,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             last = true;
             render(hwnd);
             last = false;
-            InvalidateRect(hwnd, NULL, true);
+            InvalidateRect(hwnd, NULL, false);
         }
         else if (wParam == VK_SHIFT)
         {
@@ -213,7 +220,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     wc.hInstance = hInstance;
     wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.hbrBackground = NULL;
     wc.lpszMenuName = NULL;
     wc.lpszClassName = g_szClassName;
     wc.hIconSm = LoadIcon(NULL, IDI_APPLICATION);

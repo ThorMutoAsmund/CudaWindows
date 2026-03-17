@@ -10,7 +10,7 @@ using namespace std::chrono;
 
 #define THR 24
 
-__global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result)
+__global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result, unsigned long* fastBuf)
 {
     unsigned long n;
     double p, q, r, i, prev_r, prev_i;
@@ -36,12 +36,19 @@ __global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result)
     }
     else if (border == 1)
     {
-        if (result[(blockIdx.y * THR + 1) * args->scrwidth + blockIdx.x * THR + 1] != 0xFFFFFF)
-        {
+        long col = fastBuf[blockIdx.y * THR + blockIdx.x];
+        if (col && 0xFF000000 == 0)
+        {            
             return;
         }
         ni = blockIdx.x * THR + threadIdx.x + 1;
         nj = blockIdx.y * THR + threadIdx.y + 1;
+
+        if (col && 0xFF000000 == 1)
+        {
+            result[args->scrwidth * nj + ni] = col && 0x00FFFFFF;
+            return;
+        }
     }
     else if (border == 2)
     {
@@ -50,7 +57,6 @@ __global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result)
     }
 
     int colno = 0;
-    bool allBlack = true;
     int aa = args->aa == 1 ? 1 : (args->aa == 2 && args->last ? 1 : 0);
     for (int x = 0; x <= aa % 2; ++x)
     {
@@ -81,8 +87,6 @@ __global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result)
 
             if (n < args->iterations)
             {
-                allBlack = false;
-
                 n = n % 128;
 
                 if (n < 32)
@@ -108,63 +112,116 @@ __global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result)
 
     if (aa)
     {
-        result[args->scrwidth * nj + ni] =
+        cols[0] =
             ((((cols[0] & 0xff0000) + (cols[1] & 0xff0000) + (cols[2] & 0xff0000) + (cols[3] & 0xff0000)) / 4) & 0xff0000) |
             ((((cols[0] & 0xff00) + (cols[1] & 0xff00) + (cols[2] & 0xff00) + (cols[3] & 0xff00)) / 4) & 0xff00) |
             ((((cols[0] & 0xff) + (cols[1] & 0xff) + (cols[2] & 0xff) + (cols[3] & 0xff)) / 4) & 0xff);
     }
-    else
-    {
-        result[args->scrwidth * nj + ni] = cols[0];
-    }
 
-    if (border == 0 && !allBlack)
-    {        
-        result[(blockIdx.y * THR + 1) * args->scrwidth + blockIdx.x * THR + 1] = 0xFFFFFF;
+    result[args->scrwidth * nj + ni] = cols[0];
+
+    if (border == 0)
+    {       
+        {
+            unsigned int idx = blockIdx.y * THR + blockIdx.x;
+            if ((fastBuf[idx] & 0xFF000000) == 0)
+            {
+                fastBuf[idx] = 0x01000000 | cols[0];
+            }
+            else if ((fastBuf[idx] & 0xFF000000) == 0x01000000 && (fastBuf[idx] & 0x00FFFFFF) != cols[0])
+            {
+                fastBuf[idx] = 0x02000000;
+            }
+        }
         if (threadIdx.y == 0 && blockIdx.y > 0)
         {
-            result[((blockIdx.y - 1) * THR + 1) * args->scrwidth + blockIdx.x * THR + 1] = 0xFFFFFF;
+            unsigned int idx = (blockIdx.y - 1) * THR + blockIdx.x;
+            if ((fastBuf[idx] & 0xFF000000) == 0)
+            {
+                fastBuf[idx] = 0x01000000 | cols[0];
+            }
+            else if ((fastBuf[idx] & 0xFF000000) == 0x01000000 && (fastBuf[idx] & 0x00FFFFFF) != cols[0])
+            {
+                fastBuf[idx] = 0x02000000;
+            }
         }
         if (threadIdx.y == 1 && blockIdx.x > 0)
         {
-            result[(blockIdx.y * THR + 1) * args->scrwidth + (blockIdx.x - 1) * THR + 1] = 0xFFFFFF;
+            unsigned int idx = blockIdx.y * THR + blockIdx.x - 1;
+            if ((fastBuf[idx] & 0xFF000000) == 0)
+            {
+                fastBuf[idx] = 0x01000000 | cols[0];
+            }
+            else if ((fastBuf[idx] & 0xFF000000) == 0x01000000 && (fastBuf[idx] & 0x00FFFFFF) != cols[0])
+            {
+                fastBuf[idx] = 0x02000000;
+            }
         }
     }
 }
+
+long GetRandomColor()
+{
+    long color;
+    float red = ((float)rand() / RAND_MAX) * 0.99f + 0.01f;
+    float green = ((float)rand() / RAND_MAX) * 0.99f + 0.01f;
+    float blue = ((float)rand() / RAND_MAX) * 0.99f + 0.01f;
+    
+    float max = red > green ? red : green;
+    max = max > blue ? max : blue;
+
+    red /= max;
+    green /= max;
+    blue /= max;
+
+    // reduce those aggressive pinks and lime greens 
+    green = red * 0.35f * green * 0.3f + blue * 0.35f;
+    
+    return 
+        ((red >= 1.0 ? 255 : (int)floor(red * 256.0))<<16) |
+        ((green >= 1.0 ? 255 : (int)floor(green * 256.0)) << 8) |
+        (blue >= 1.0 ? 255 : (int)floor(blue * 256.0));
+
+    //srand((unsigned)time(NULL));
+}
+ 
 
 void cudaMandel(CudaArgs *args, unsigned char* lpBitmapBits)
 {
     auto t1 = high_resolution_clock::now();
 
+    // Image buffer
     unsigned long outputSize = sizeof(unsigned long) * args->scrwidth * args->scrheight;
     unsigned long* cudaResult = 0;
-
     cudaMalloc(&cudaResult, outputSize);
+
     //cudaMemset(&cudaResult, 0, outputSize);
 
-    int numBytes = sizeof(CudaArgs);
-
     CudaArgs* gpuArgs;
-    cudaMalloc((void**)&gpuArgs, numBytes);
-    cudaMemcpy(gpuArgs, args, numBytes, cudaMemcpyHostToDevice);
+    cudaMalloc((void**)&gpuArgs, sizeof(CudaArgs));
+    cudaMemcpy(gpuArgs, args, sizeof(CudaArgs), cudaMemcpyHostToDevice);
 
     dim3 numBlocks(args->scrwidth / THR, args->scrheight / THR);
+
+    // Buffer for storing information for fast processing
+    unsigned long* cudaFastBuf = 0;
+    cudaMalloc(&cudaFastBuf, sizeof(unsigned long) * numBlocks.x * numBlocks.y);
 
     if (!args->slow)
     {
         // Execute kernel
         dim3 threadsPerBlock0(THR, 2);
-        asyncMandel <<< numBlocks, threadsPerBlock0 >> > (gpuArgs, 0, cudaResult);
+        asyncMandel <<< numBlocks, threadsPerBlock0 >> > (gpuArgs, 0, cudaResult, cudaFastBuf);
 
         // Execute kernel2
         dim3 threadsPerBlock1(THR - 1, THR - 1);
-        asyncMandel <<< numBlocks, threadsPerBlock1 >> > (gpuArgs, 1, cudaResult);
+        asyncMandel <<< numBlocks, threadsPerBlock1 >> > (gpuArgs, 1, cudaResult, cudaFastBuf);
     }
     else
     {
         // Execute kernel2
         dim3 threadsPerBlock2(THR, THR);
-        asyncMandel <<< numBlocks, threadsPerBlock2 >>> (gpuArgs, 2, cudaResult);
+        asyncMandel <<< numBlocks, threadsPerBlock2 >>> (gpuArgs, 2, cudaResult, cudaFastBuf);
     }
 
 
