@@ -28,25 +28,57 @@ int xPos;
 int yPos;
 bool last = true;
 bool ready = false;
+bool showOverlay = true;
+const double kIterationExponent = 1.3;
+double iterationScale = 20.0;
 
 CudaArgs cpuArgs;
+
+double getCurrentZoomFactor()
+{
+    const double initialWidth = (kInitialXMax - kInitialXMin);
+    const double currentWidth = (xmax - xmin);
+    if (currentWidth <= 0.0)
+    {
+        return 1.0;
+    }
+    return initialWidth / currentWidth;
+}
+
+int getIterationsForZoom(double zoomFactor)
+{
+    // Smooth single-formula approximation:
+    // iter ~= 100 + scale * ln(zoom)^exponent
+    const double z = zoomFactor > 1.0 ? zoomFactor : 1.0;
+    const double iter = 100.0 + iterationScale * pow(log(z), kIterationExponent);
+    const int rounded = (int)round(iter);
+    if (rounded < 100)
+    {
+        return 100;
+    }
+    if (rounded > 4096)
+    {
+        return 4096;
+    }
+    return rounded;
+}
 
 void drawOverlay(HDC hdc)
 {
     const double centerX = (xmin + xmax) * 0.5;
     const double centerY = (ymin + ymax) * 0.5;
-    const double initialWidth = (kInitialXMax - kInitialXMin);
-    const double currentWidth = (xmax - xmin);
-    const double zoomFactor = currentWidth > 0.0 ? (initialWidth / currentWidth) : 1.0;
+    const double zoomFactor = getCurrentZoomFactor();
 
     char overlay[256];
     sprintf(
         overlay,
-        "Center: (%.12f, %.12f)\nZoom: %.3fx\nIterations: %d",
+        "Center: (%.12f, %.12f)\nZoom: %.3fx\nIterations: %d\nExponent: %.2f\nScale: %.1f",
         centerX,
         centerY,
         zoomFactor,
-        cpuArgs.iterations);
+        cpuArgs.iterations,
+        kIterationExponent,
+        iterationScale);
 
     RECT rc = { 10, 10, WIDTH - 10, 180 };
     SetBkMode(hdc, TRANSPARENT);
@@ -112,7 +144,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         GetObject(bitmap, sizeof(bm), &bm);
         BitBlt(hdc, 0, 0, bm.bmWidth, bm.bmHeight, hDCMem, 0, 0, SRCCOPY);
-        drawOverlay(hdc);
+        if (showOverlay)
+        {
+            drawOverlay(hdc);
+        }
 
         EndPaint(hwnd, &ps);
         ready = true;
@@ -150,7 +185,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_KEYDOWN:
     {
-        if (wParam == 0x41)
+        if (wParam == VK_F1)
+        {
+            showOverlay = !showOverlay;
+            InvalidateRect(hwnd, NULL, false);
+        }
+        else if (wParam == 0x41)
         {
             cpuArgs.aa = cpuArgs.aa == 0 ? 1 : (cpuArgs.aa == 1 ? 2 : 0);
             last = true;
@@ -168,14 +208,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         else if (wParam == 0x49)
         {
-            if (turbo && cpuArgs.iterations > 16)
+            const bool shiftHeld = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            iterationScale += shiftHeld ? -1.0 : 1.0;
+            if (iterationScale < 1.0)
             {
-                cpuArgs.iterations -= 16;
+                iterationScale = 1.0;
             }
-            else if (!turbo)
+            else if (iterationScale > 200.0)
             {
-                cpuArgs.iterations += 16;
+                iterationScale = 200.0;
             }
+            iterationScale = round(iterationScale * 10.0) / 10.0;
             last = true;
             render(hwnd);
             last = false;
@@ -226,7 +269,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     cpuArgs.scrheight = HEIGHT;
     cpuArgs.scrwidth = WIDTH;
     cpuArgs.aa = 2;
-    cpuArgs.iterations = 512;
+    cpuArgs.iterations = getIterationsForZoom(getCurrentZoomFactor());
 
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
@@ -309,6 +352,7 @@ void initDIBS(HWND hwnd)
 
 void render(HWND hwnd)
 {
+    cpuArgs.iterations = getIterationsForZoom(getCurrentZoomFactor());
     cpuArgs.width = (xmax - xmin);
     cpuArgs.height = (ymax - ymin);
     cpuArgs.xmin = xmin;
