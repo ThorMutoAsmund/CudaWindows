@@ -97,7 +97,7 @@ __global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result, u
     }
 
     int colno = 0;
-    int aa = args->aa == 1 ? 1 : (args->aa == 2 && args->last ? 1 : 0);
+    int aa = (args->last && args->aa) ? 1 : 0;
     for (int x = 0; x <= aa % 2; ++x)
     {
         p = (((double)ni + x / 2.0f) * args->width / renderWidth) + args->xmin;

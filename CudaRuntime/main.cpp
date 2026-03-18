@@ -26,11 +26,14 @@ int zoom = 0;
 bool turbo = false;
 int xPos;
 int yPos;
+bool panning = false;
+int panLastX = 0;
+int panLastY = 0;
 bool last = true;
 bool ready = false;
 bool showOverlay = true;
 const double kIterationExponent = 1.3;
-double iterationScale = 20.0;
+double iterationScale = 16.0;
 
 CudaArgs cpuArgs;
 
@@ -68,17 +71,18 @@ void drawOverlay(HDC hdc)
     const double centerX = (xmin + xmax) * 0.5;
     const double centerY = (ymin + ymax) * 0.5;
     const double zoomFactor = getCurrentZoomFactor();
+    const char* antialiasState = cpuArgs.aa ? "ON" : "OFF";
 
     char overlay[256];
     sprintf(
         overlay,
-        "Center: (%.12f, %.12f)\nZoom: %.3fx\nIterations: %d\nExponent: %.2f\nScale: %.1f",
+        "Use L/R mouse button to zoom, M mouse button to pan. Hold shift for turbo\nCenter: (%.12f, %.12f)\nZoom: %.3fx\nIterations: %d\nScale: %.1f\nAntialias: %s",
         centerX,
         centerY,
         zoomFactor,
         cpuArgs.iterations,
-        kIterationExponent,
-        iterationScale);
+        iterationScale,
+        antialiasState);
 
     RECT rc = { 10, 10, WIDTH - 10, 180 };
     SetBkMode(hdc, TRANSPARENT);
@@ -106,7 +110,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_TIMER:
     {
-        if ((zoom != 0 || last) && ready)
+        const bool panMoved = panning && (xPos != panLastX || yPos != panLastY);
+        if ((zoom != 0 || panMoved || last) && ready)
         {
             if (zoom)
             {
@@ -122,6 +127,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 c = (double)yPos / HEIGHT;
                 ymin = ymin * (1.0 - c) + ymax * c - (c * newHeight);
                 ymax = ymin + newHeight;
+            }
+            else if (panMoved)
+            {
+                const int dx = xPos - panLastX;
+                const int dy = yPos - panLastY;
+                const double width = xmax - xmin;
+                const double height = ymax - ymin;
+
+                const double moveX = -(double)dx * width / WIDTH;
+                const double moveY = -(double)dy * height / HEIGHT;
+
+                xmin += moveX;
+                xmax += moveX;
+                ymin += moveY;
+                ymax += moveY;
+
+                panLastX = xPos;
+                panLastY = yPos;
             }
  
             ready = false;
@@ -168,11 +191,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
     break;
 
+    case WM_MBUTTONDOWN:
+    {
+        panning = true;
+        panLastX = GET_X_LPARAM(lParam);
+        panLastY = GET_Y_LPARAM(lParam);
+        xPos = panLastX;
+        yPos = panLastY;
+        SetCapture(hwnd);
+    }
+    break;
+
     case WM_LBUTTONUP:
     case WM_RBUTTONUP:
     {
         zoom = 0;
         last = true;
+    }
+    break;
+
+    case WM_MBUTTONUP:
+    {
+        if (panning)
+        {
+            panning = false;
+            ReleaseCapture();
+            last = true;
+        }
     }
     break;
 
@@ -192,7 +237,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         else if (wParam == 0x41)
         {
-            cpuArgs.aa = cpuArgs.aa == 0 ? 1 : (cpuArgs.aa == 1 ? 2 : 0);
+            cpuArgs.aa = cpuArgs.aa ? 0 : 1;
             last = true;
             render(hwnd);
             last = false;
@@ -268,7 +313,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 {
     cpuArgs.scrheight = HEIGHT;
     cpuArgs.scrwidth = WIDTH;
-    cpuArgs.aa = 2;
+    cpuArgs.aa = 1;
     cpuArgs.iterations = getIterationsForZoom(getCurrentZoomFactor());
 
     cudaDeviceProp prop;
