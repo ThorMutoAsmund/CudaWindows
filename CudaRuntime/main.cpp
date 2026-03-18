@@ -5,14 +5,17 @@
 
 using namespace std;
 
-#define WIDTH 2048
-#define HEIGHT 2048
+const int kRenderSizeMin = 512;
+const int kRenderSizeMax = 2048;
+const int kRenderSizeStep = 128;
+int renderSize = kRenderSizeMax;
 
 // Tutorials
 // http://www.winprog.org/tutorial/bitmaps.html
 
 const char g_szClassName[] = "myWindowClass";
 void initDIBS(HWND hwnd);
+void setRenderSize(HWND hwnd, int newSize);
 void render(HWND hwnd);
 
 BITMAPINFO bi;
@@ -150,7 +153,7 @@ void drawOverlay(HDC hdc)
     {
         sprintf(
             overlay,
-            "Use L/R mouse button to zoom, M mouse button to pan. Hold shift for turbo\nA=AntiAlias, C=Color cycle, I=Iteration multiplier\nCenter: (%.12f, %.12f)\nZoom: %.3fx\nIterations: %d\nScale: %.1f\nAntialias: %s",
+            "Use L/R mouse button to zoom, and shift for turbo. Press scroll wheel to pan.\nF1=Info toggle, A=AntiAlias, C=Color cycle, I=Iteration multiplier, R=Screen resolution\nCenter: (%.12f, %.12f)\nZoom: %.3fx\nIterations: %d\nScale: %.1f\nAntialias: %s",
             centerX,
             centerY,
             zoomFactor,
@@ -162,7 +165,7 @@ void drawOverlay(HDC hdc)
     {
         sprintf(
             overlay,
-            "Center: (%.12f, %.12f)\nZoom: %.3fx\nIterations: %d",
+            "Center: (%.12f, %.12f)\nZoom: %.3fx\nIterations: %d\nScale: %.1f\nAntialias: %s",
             centerX,
             centerY,
             zoomFactor,
@@ -171,7 +174,7 @@ void drawOverlay(HDC hdc)
             antialiasState);
     }
 
-    RECT rc = { 10, 10, WIDTH - 10, 180 };
+    RECT rc = { 10, 10, renderSize - 10, 220 };
     SetBkMode(hdc, TRANSPARENT);
 
     // Draw a thicker black outline for stronger readability.
@@ -217,11 +220,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 double newWidth = (xmax - xmin) * fac;
                 double newHeight = (ymax - ymin) * fac;
 
-                double c = (double)xPos / WIDTH;
+                double c = (double)xPos / renderSize;
                 xmin = xmin * (1.0 - c) + xmax * c - (c * newWidth);
                 xmax = xmin + newWidth;
 
-                c = (double)yPos / HEIGHT;
+                c = (double)yPos / renderSize;
                 ymin = ymin * (1.0 - c) + ymax * c - (c * newHeight);
                 ymax = ymin + newHeight;
             }
@@ -232,8 +235,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 const double width = xmax - xmin;
                 const double height = ymax - ymin;
 
-                const double moveX = -(double)dx * width / WIDTH;
-                const double moveY = -(double)dy * height / HEIGHT;
+                const double moveX = -(double)dx * width / renderSize;
+                const double moveY = -(double)dy * height / renderSize;
 
                 xmin += moveX;
                 xmax += moveX;
@@ -380,6 +383,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             last = false;
             InvalidateRect(hwnd, NULL, false);
         }
+        else if (wParam == 0x52)
+        {
+            const bool shiftHeld = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const int delta = shiftHeld ? -kRenderSizeStep : kRenderSizeStep;
+            int newSize = renderSize + delta;
+            if (newSize < kRenderSizeMin)
+            {
+                newSize = kRenderSizeMin;
+            }
+            else if (newSize > kRenderSizeMax)
+            {
+                newSize = kRenderSizeMax;
+            }
+            setRenderSize(hwnd, newSize);
+        }
         else if (wParam == VK_SHIFT)
         {
             turbo = true;
@@ -428,11 +446,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 {
     srand((unsigned int)time(NULL));
 
-    cpuArgs.scrheight = HEIGHT;
-    cpuArgs.scrwidth = WIDTH;
+    cpuArgs.scrheight = renderSize;
+    cpuArgs.scrwidth = renderSize;
     cpuArgs.aa = 1;
     cpuArgs.useCustomPalette = 0;
     cpuArgs.iterations = getIterationsForZoom(getCurrentZoomFactor());
+    xPos = renderSize / 2;
+    yPos = renderSize / 2;
+    panLastX = xPos;
+    panLastY = yPos;
 
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
@@ -446,8 +468,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     // Create bitmap info
     ZeroMemory(&bi, sizeof(BITMAPINFO));
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = WIDTH;
-    bi.bmiHeader.biHeight = -HEIGHT;  //negative so (0,0) is at top left
+    bi.bmiHeader.biWidth = renderSize;
+    bi.bmiHeader.biHeight = -renderSize;  //negative so (0,0) is at top left
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 32;
 
@@ -473,12 +495,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
 
     // Create and show the Window
+    RECT wr = { 0, 0, renderSize, renderSize };
+    AdjustWindowRectEx(&wr, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME, FALSE, WS_EX_CLIENTEDGE);
+
     HWND hwnd = CreateWindowEx(
         WS_EX_CLIENTEDGE,
         g_szClassName,
         "CUDA test",
         WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME,
-        CW_USEDEFAULT, CW_USEDEFAULT, WIDTH, 43 + HEIGHT,
+        CW_USEDEFAULT, CW_USEDEFAULT, wr.right - wr.left, wr.bottom - wr.top,
         NULL, NULL, hInstance, NULL);
 
     if (hwnd == NULL)
@@ -504,15 +529,72 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 void initDIBS(HWND hwnd)
 {
     HDC hdc = GetDC(hwnd);
-    hDCMem = CreateCompatibleDC(hdc);
-    hDCFrame = CreateCompatibleDC(hdc);
-    bitmap = ::CreateDIBSection(hDCMem, &bi, DIB_RGB_COLORS, (VOID**)&lpBitmapBits, NULL, 0);
-    frameBitmap = CreateCompatibleBitmap(hdc, WIDTH, HEIGHT);
+    if (!hDCMem)
+    {
+        hDCMem = CreateCompatibleDC(hdc);
+    }
+    if (!hDCFrame)
+    {
+        hDCFrame = CreateCompatibleDC(hdc);
+    }
+    if (bitmap)
+    {
+        DeleteObject(bitmap);
+        bitmap = NULL;
+    }
+    if (frameBitmap)
+    {
+        DeleteObject(frameBitmap);
+        frameBitmap = NULL;
+    }
 
-    //memset(lpBitmapBits, 0, WIDTH * HEIGHT * sizeof(long));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = renderSize;
+    bi.bmiHeader.biHeight = -renderSize;  //negative so (0,0) is at top left
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+
+    bitmap = ::CreateDIBSection(hDCMem, &bi, DIB_RGB_COLORS, (VOID**)&lpBitmapBits, NULL, 0);
+    frameBitmap = CreateCompatibleBitmap(hdc, renderSize, renderSize);
+
+    //memset(lpBitmapBits, 0, renderSize * renderSize * sizeof(long));
 
     //DeleteDC(hDCMem);
     ReleaseDC(hwnd, hdc);
+}
+
+void setRenderSize(HWND hwnd, int newSize)
+{
+    if (newSize == renderSize)
+    {
+        return;
+    }
+
+    renderSize = newSize;
+    cpuArgs.scrwidth = renderSize;
+    cpuArgs.scrheight = renderSize;
+    xPos = renderSize / 2;
+    yPos = renderSize / 2;
+    panLastX = xPos;
+    panLastY = yPos;
+
+    initDIBS(hwnd);
+
+    RECT wr = { 0, 0, renderSize, renderSize };
+    AdjustWindowRectEx(&wr, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME, FALSE, WS_EX_CLIENTEDGE);
+    SetWindowPos(
+        hwnd,
+        NULL,
+        0,
+        0,
+        wr.right - wr.left,
+        wr.bottom - wr.top,
+        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+    last = true;
+    ready = false;
+    render(hwnd);
+    InvalidateRect(hwnd, NULL, false);
 }
 
 void render(HWND hwnd)
