@@ -1,5 +1,7 @@
 #include "main.h"
 #include <cmath>
+#include <cstdlib>
+#include <ctime>
 
 using namespace std;
 
@@ -16,6 +18,8 @@ void render(HWND hwnd);
 BITMAPINFO bi;
 HBITMAP bitmap;
 HDC hDCMem;
+HBITMAP frameBitmap;
+HDC hDCFrame;
 unsigned char* lpBitmapBits;
 const double kInitialXMin = -2.10;
 const double kInitialXMax = 0.85;
@@ -31,11 +35,79 @@ int panLastX = 0;
 int panLastY = 0;
 bool last = true;
 bool ready = false;
-bool showOverlay = true;
+int overlayMode = 0; // 0=full, 1=compact, 2=off
 const double kIterationExponent = 1.3;
 double iterationScale = 16.0;
 
 CudaArgs cpuArgs;
+
+unsigned int hsvToRgb(float h, float s, float v)
+{
+    h = h - floorf(h);
+    const float hf = h * 6.0f;
+    const int sector = (int)floorf(hf);
+    const float f = hf - sector;
+
+    const float p = v * (1.0f - s);
+    const float q = v * (1.0f - s * f);
+    const float t = v * (1.0f - s * (1.0f - f));
+
+    float r = 0.0f, g = 0.0f, b = 0.0f;
+    switch (sector % 6)
+    {
+    case 0: r = v; g = t; b = p; break;
+    case 1: r = q; g = v; b = p; break;
+    case 2: r = p; g = v; b = t; break;
+    case 3: r = p; g = q; b = v; break;
+    case 4: r = t; g = p; b = v; break;
+    default: r = v; g = p; b = q; break;
+    }
+
+    return
+        ((unsigned int)(r * 255.0f) << 16) |
+        ((unsigned int)(g * 255.0f) << 8) |
+        (unsigned int)(b * 255.0f);
+}
+
+unsigned int lerpRgb(unsigned int c0, unsigned int c1, float t)
+{
+    const float r0 = (float)((c0 >> 16) & 0xFF);
+    const float g0 = (float)((c0 >> 8) & 0xFF);
+    const float b0 = (float)(c0 & 0xFF);
+    const float r1 = (float)((c1 >> 16) & 0xFF);
+    const float g1 = (float)((c1 >> 8) & 0xFF);
+    const float b1 = (float)(c1 & 0xFF);
+
+    const unsigned int r = (unsigned int)roundf(r0 + (r1 - r0) * t);
+    const unsigned int g = (unsigned int)roundf(g0 + (g1 - g0) * t);
+    const unsigned int b = (unsigned int)roundf(b0 + (b1 - b0) * t);
+
+    return (r << 16) | (g << 8) | b;
+}
+
+void generateRandomPalette(unsigned int palette[128])
+{
+    unsigned int anchors[4];
+    const float baseHue = (float)rand() / (float)RAND_MAX;
+    const float hueStep = 0.10f + 0.30f * ((float)rand() / (float)RAND_MAX);
+
+    for (int i = 0; i < 4; ++i)
+    {
+        const float hueJitter = ((float)rand() / (float)RAND_MAX - 0.5f) * 0.10f;
+        const float h = baseHue + hueStep * i + hueJitter;
+        const float s = 0.65f + 0.35f * ((float)rand() / (float)RAND_MAX);
+        const float v = 0.45f + 0.55f * ((float)rand() / (float)RAND_MAX);
+        anchors[i] = hsvToRgb(h, s, v);
+    }
+
+    for (int i = 0; i < 128; ++i)
+    {
+        const int seg = i / 32;               // 0..3
+        const int segNext = (seg + 1) % 4;    // wrap last segment to first anchor
+        const float t = (float)(i % 32) / 31.0f;
+        palette[i] = lerpRgb(anchors[seg], anchors[segNext], t);
+    }
+}
 
 double getCurrentZoomFactor()
 {
@@ -73,24 +145,49 @@ void drawOverlay(HDC hdc)
     const double zoomFactor = getCurrentZoomFactor();
     const char* antialiasState = cpuArgs.aa ? "ON" : "OFF";
 
-    char overlay[256];
-    sprintf(
-        overlay,
-        "Use L/R mouse button to zoom, M mouse button to pan. Hold shift for turbo\nCenter: (%.12f, %.12f)\nZoom: %.3fx\nIterations: %d\nScale: %.1f\nAntialias: %s",
-        centerX,
-        centerY,
-        zoomFactor,
-        cpuArgs.iterations,
-        iterationScale,
-        antialiasState);
+    char overlay[512];
+    if (overlayMode == 0)
+    {
+        sprintf(
+            overlay,
+            "Use L/R mouse button to zoom, M mouse button to pan. Hold shift for turbo\nA=AntiAlias, C=Color cycle, I=Iteration multiplier\nCenter: (%.12f, %.12f)\nZoom: %.3fx\nIterations: %d\nScale: %.1f\nAntialias: %s",
+            centerX,
+            centerY,
+            zoomFactor,
+            cpuArgs.iterations,
+            iterationScale,
+            antialiasState);
+    }
+    else
+    {
+        sprintf(
+            overlay,
+            "Center: (%.12f, %.12f)\nZoom: %.3fx\nIterations: %d",
+            centerX,
+            centerY,
+            zoomFactor,
+            cpuArgs.iterations,
+            iterationScale,
+            antialiasState);
+    }
 
     RECT rc = { 10, 10, WIDTH - 10, 180 };
     SetBkMode(hdc, TRANSPARENT);
 
-    // Draw a black shadow for readability.
+    // Draw a thicker black outline for stronger readability.
     SetTextColor(hdc, RGB(0, 0, 0));
-    RECT shadow = { rc.left + 1, rc.top + 1, rc.right + 1, rc.bottom + 1 };
-    DrawTextA(hdc, overlay, -1, &shadow, DT_LEFT | DT_TOP | DT_NOPREFIX);
+    for (int oy = -2; oy <= 2; ++oy)
+    {
+        for (int ox = -2; ox <= 2; ++ox)
+        {
+            if (ox == 0 && oy == 0)
+            {
+                continue;
+            }
+            RECT outline = { rc.left + ox, rc.top + oy, rc.right + ox, rc.bottom + oy };
+            DrawTextA(hdc, overlay, -1, &outline, DT_LEFT | DT_TOP | DT_NOPREFIX);
+        }
+    }
 
     SetTextColor(hdc, RGB(255, 255, 255));
     DrawTextA(hdc, overlay, -1, &rc, DT_LEFT | DT_TOP | DT_NOPREFIX);
@@ -163,14 +260,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         HDC hdc = BeginPaint(hwnd, &ps);
 
         BITMAP bm;
-        auto hbmOld = SelectObject(hDCMem, bitmap);
+        auto hbmOldSrc = SelectObject(hDCMem, bitmap);
+        auto hbmOldDst = SelectObject(hDCFrame, frameBitmap);
 
         GetObject(bitmap, sizeof(bm), &bm);
-        BitBlt(hdc, 0, 0, bm.bmWidth, bm.bmHeight, hDCMem, 0, 0, SRCCOPY);
-        if (showOverlay)
+        BitBlt(hDCFrame, 0, 0, bm.bmWidth, bm.bmHeight, hDCMem, 0, 0, SRCCOPY);
+        if (overlayMode != 2)
         {
-            drawOverlay(hdc);
+            drawOverlay(hDCFrame);
         }
+        BitBlt(hdc, 0, 0, bm.bmWidth, bm.bmHeight, hDCFrame, 0, 0, SRCCOPY);
+
+        SelectObject(hDCMem, hbmOldSrc);
+        SelectObject(hDCFrame, hbmOldDst);
 
         EndPaint(hwnd, &ps);
         ready = true;
@@ -232,7 +334,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         if (wParam == VK_F1)
         {
-            showOverlay = !showOverlay;
+            overlayMode = (overlayMode + 1) % 3;
             InvalidateRect(hwnd, NULL, false);
         }
         else if (wParam == 0x41)
@@ -246,6 +348,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         else if (wParam == 0x42)
         {
             cpuArgs.slow = 1 - cpuArgs.slow;
+            last = true;
+            render(hwnd);
+            last = false;
+            InvalidateRect(hwnd, NULL, false);
+        }
+        else if (wParam == 0x43)
+        {
+            generateRandomPalette(cpuArgs.palette);
+            cpuArgs.useCustomPalette = 1;
             last = true;
             render(hwnd);
             last = false;
@@ -289,16 +400,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_CLOSE:
     {
-        DeleteDC(hDCMem);
-        DeleteObject(bitmap);
+        if (hDCMem) { DeleteDC(hDCMem); hDCMem = NULL; }
+        if (hDCFrame) { DeleteDC(hDCFrame); hDCFrame = NULL; }
+        if (bitmap) { DeleteObject(bitmap); bitmap = NULL; }
+        if (frameBitmap) { DeleteObject(frameBitmap); frameBitmap = NULL; }
         DestroyWindow(hwnd);
     }
     break;
 
     case WM_DESTROY:
     {
-        //DeleteDC(hDCMem);
-        DeleteObject(bitmap);
+        if (hDCMem) { DeleteDC(hDCMem); hDCMem = NULL; }
+        if (hDCFrame) { DeleteDC(hDCFrame); hDCFrame = NULL; }
+        if (bitmap) { DeleteObject(bitmap); bitmap = NULL; }
+        if (frameBitmap) { DeleteObject(frameBitmap); frameBitmap = NULL; }
         PostQuitMessage(0);
     }
     break;
@@ -311,9 +426,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     LPSTR lpCmdLine, int nCmdShow)
 {
+    srand((unsigned int)time(NULL));
+
     cpuArgs.scrheight = HEIGHT;
     cpuArgs.scrwidth = WIDTH;
     cpuArgs.aa = 1;
+    cpuArgs.useCustomPalette = 0;
     cpuArgs.iterations = getIterationsForZoom(getCurrentZoomFactor());
 
     cudaDeviceProp prop;
@@ -387,7 +505,9 @@ void initDIBS(HWND hwnd)
 {
     HDC hdc = GetDC(hwnd);
     hDCMem = CreateCompatibleDC(hdc);
+    hDCFrame = CreateCompatibleDC(hdc);
     bitmap = ::CreateDIBSection(hDCMem, &bi, DIB_RGB_COLORS, (VOID**)&lpBitmapBits, NULL, 0);
+    frameBitmap = CreateCompatibleBitmap(hdc, WIDTH, HEIGHT);
 
     //memset(lpBitmapBits, 0, WIDTH * HEIGHT * sizeof(long));
 

@@ -18,6 +18,8 @@ typedef struct
     double xmin;
     double ymin;
     int last;
+    int useCustomPalette;
+    unsigned int palette[128];
 } CudaArgs;
 
 

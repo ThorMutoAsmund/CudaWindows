@@ -129,7 +129,11 @@ __global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result, u
             {
                 n = n % 128;
 
-                if (n < 32)
+                if (args->useCustomPalette)
+                {
+                    cols[colno] = args->palette[n];
+                }
+                else if (n < 32)
                 {
                     cols[colno] = 0x000008 * n;
                 }
