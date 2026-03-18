@@ -1,4 +1,4 @@
-﻿#include "kernel.cuh"
+#include "kernel.cuh"
 
 #define CUDA_MAGNITUDE_CUTOFF 4
 
@@ -17,8 +17,13 @@ __global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result, u
 
     unsigned long cols[4];
 
-    int ni;
-    int nj;
+    const bool fastPass = !args->slow && !args->last;
+    const int renderWidth = fastPass ? (args->scrwidth + 1) / 2 : args->scrwidth;
+    const int renderHeight = fastPass ? (args->scrheight + 1) / 2 : args->scrheight;
+    const unsigned int fastIdx = blockIdx.y * gridDim.x + blockIdx.x;
+
+    int ni = 0;
+    int nj = 0;
     
     if (border == 0)
     {        
@@ -36,17 +41,47 @@ __global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result, u
     }
     else if (border == 1)
     {
-        long col = fastBuf[blockIdx.y * THR + blockIdx.x];
-        if (col && 0xFF000000 == 0)
+        unsigned long col = fastBuf[fastIdx];
+        if ((col & 0xFF000000) == 0)
         {            
             return;
         }
         ni = blockIdx.x * THR + threadIdx.x + 1;
         nj = blockIdx.y * THR + threadIdx.y + 1;
 
-        if (col && 0xFF000000 == 1)
+        if (ni >= renderWidth || nj >= renderHeight)
         {
-            result[args->scrwidth * nj + ni] = col && 0x00FFFFFF;
+            return;
+        }
+
+        if ((col & 0xFF000000) == 0x01000000)
+        {
+            unsigned long fillCol = col & 0x00FFFFFF;
+            if (fastPass)
+            {
+                int dstX = ni * 2;
+                int dstY = nj * 2;
+                for (int y = 0; y < 2; ++y)
+                {
+                    int outY = dstY + y;
+                    if (outY >= args->scrheight)
+                    {
+                        continue;
+                    }
+                    for (int x = 0; x < 2; ++x)
+                    {
+                        int outX = dstX + x;
+                        if (outX < args->scrwidth)
+                        {
+                            result[args->scrwidth * outY + outX] = fillCol;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                result[args->scrwidth * nj + ni] = fillCol;
+            }
             return;
         }
     }
@@ -56,15 +91,20 @@ __global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result, u
         nj = blockIdx.y * THR + threadIdx.y;
     }
 
+    if (ni >= renderWidth || nj >= renderHeight)
+    {
+        return;
+    }
+
     int colno = 0;
     int aa = args->aa == 1 ? 1 : (args->aa == 2 && args->last ? 1 : 0);
     for (int x = 0; x <= aa % 2; ++x)
     {
-        p = (((double)ni + x / 2.0f) * args->width / args->scrwidth) + args->xmin;
+        p = (((double)ni + x / 2.0f) * args->width / renderWidth) + args->xmin;
 
         for (int y = 0; y <= aa; ++y)
         {
-            q = (((double)nj + y / 2.0f) * args->height / args->scrheight) + args->ymin;
+            q = (((double)nj + y / 2.0f) * args->height / renderHeight) + args->ymin;
 
             prev_i = 0.0f;
             prev_r = 0.0f;
@@ -118,12 +158,36 @@ __global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result, u
             ((((cols[0] & 0xff) + (cols[1] & 0xff) + (cols[2] & 0xff) + (cols[3] & 0xff)) / 4) & 0xff);
     }
 
-    result[args->scrwidth * nj + ni] = cols[0];
+    if (fastPass)
+    {
+        int dstX = ni * 2;
+        int dstY = nj * 2;
+        for (int y = 0; y < 2; ++y)
+        {
+            int outY = dstY + y;
+            if (outY >= args->scrheight)
+            {
+                continue;
+            }
+            for (int x = 0; x < 2; ++x)
+            {
+                int outX = dstX + x;
+                if (outX < args->scrwidth)
+                {
+                    result[args->scrwidth * outY + outX] = cols[0];
+                }
+            }
+        }
+    }
+    else
+    {
+        result[args->scrwidth * nj + ni] = cols[0];
+    }
 
     if (border == 0)
     {       
         {
-            unsigned int idx = blockIdx.y * THR + blockIdx.x;
+            unsigned int idx = fastIdx;
             if ((fastBuf[idx] & 0xFF000000) == 0)
             {
                 fastBuf[idx] = 0x01000000 | cols[0];
@@ -135,7 +199,7 @@ __global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result, u
         }
         if (threadIdx.y == 0 && blockIdx.y > 0)
         {
-            unsigned int idx = (blockIdx.y - 1) * THR + blockIdx.x;
+            unsigned int idx = (blockIdx.y - 1) * gridDim.x + blockIdx.x;
             if ((fastBuf[idx] & 0xFF000000) == 0)
             {
                 fastBuf[idx] = 0x01000000 | cols[0];
@@ -147,7 +211,7 @@ __global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result, u
         }
         if (threadIdx.y == 1 && blockIdx.x > 0)
         {
-            unsigned int idx = blockIdx.y * THR + blockIdx.x - 1;
+            unsigned int idx = blockIdx.y * gridDim.x + blockIdx.x - 1;
             if ((fastBuf[idx] & 0xFF000000) == 0)
             {
                 fastBuf[idx] = 0x01000000 | cols[0];
@@ -201,28 +265,14 @@ void cudaMandel(CudaArgs *args, unsigned char* lpBitmapBits)
     cudaMalloc((void**)&gpuArgs, sizeof(CudaArgs));
     cudaMemcpy(gpuArgs, args, sizeof(CudaArgs), cudaMemcpyHostToDevice);
 
-    dim3 numBlocks(args->scrwidth / THR, args->scrheight / THR);
+    const bool fastPass = !args->slow && !args->last;
+    int renderWidth = fastPass ? (args->scrwidth + 1) / 2 : args->scrwidth;
+    int renderHeight = fastPass ? (args->scrheight + 1) / 2 : args->scrheight;
+    dim3 numBlocks((renderWidth + THR - 1) / THR, (renderHeight + THR - 1) / THR);
 
-    // Buffer for storing information for fast processing
-    unsigned long* cudaFastBuf = 0;
-    cudaMalloc(&cudaFastBuf, sizeof(unsigned long) * numBlocks.x * numBlocks.y);
-
-    if (!args->slow)
-    {
-        // Execute kernel
-        dim3 threadsPerBlock0(THR, 2);
-        asyncMandel <<< numBlocks, threadsPerBlock0 >> > (gpuArgs, 0, cudaResult, cudaFastBuf);
-
-        // Execute kernel2
-        dim3 threadsPerBlock1(THR - 1, THR - 1);
-        asyncMandel <<< numBlocks, threadsPerBlock1 >> > (gpuArgs, 1, cudaResult, cudaFastBuf);
-    }
-    else
-    {
-        // Execute kernel2
-        dim3 threadsPerBlock2(THR, THR);
-        asyncMandel <<< numBlocks, threadsPerBlock2 >>> (gpuArgs, 2, cudaResult, cudaFastBuf);
-    }
+    // Use direct full-tile kernel for both passes; fast pass differs by reduced resolution only.
+    dim3 threadsPerBlock2(THR, THR);
+    asyncMandel <<< numBlocks, threadsPerBlock2 >>> (gpuArgs, 2, cudaResult, nullptr);
 
 
     cudaMemcpy(lpBitmapBits, cudaResult, outputSize, cudaMemcpyDeviceToHost);
