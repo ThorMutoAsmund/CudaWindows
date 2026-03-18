@@ -1,4 +1,5 @@
 #include "main.h"
+#include <cmath>
 
 using namespace std;
 
@@ -16,7 +17,11 @@ BITMAPINFO bi;
 HBITMAP bitmap;
 HDC hDCMem;
 unsigned char* lpBitmapBits;
-double xmin = -2.10, xmax = 0.85, ymin = -1.5, ymax = 1.5;
+const double kInitialXMin = -2.10;
+const double kInitialXMax = 0.85;
+const double kInitialYMin = -1.5;
+const double kInitialYMax = 1.5;
+double xmin = kInitialXMin, xmax = kInitialXMax, ymin = kInitialYMin, ymax = kInitialYMax;
 int zoom = 0;
 bool turbo = false;
 int xPos;
@@ -25,6 +30,35 @@ bool last = true;
 bool ready = false;
 
 CudaArgs cpuArgs;
+
+void drawOverlay(HDC hdc)
+{
+    const double centerX = (xmin + xmax) * 0.5;
+    const double centerY = (ymin + ymax) * 0.5;
+    const double initialWidth = (kInitialXMax - kInitialXMin);
+    const double currentWidth = (xmax - xmin);
+    const double zoomFactor = currentWidth > 0.0 ? (initialWidth / currentWidth) : 1.0;
+
+    char overlay[256];
+    sprintf(
+        overlay,
+        "Center: (%.12f, %.12f)\nZoom: %.3fx\nIterations: %d",
+        centerX,
+        centerY,
+        zoomFactor,
+        cpuArgs.iterations);
+
+    RECT rc = { 10, 10, WIDTH - 10, 180 };
+    SetBkMode(hdc, TRANSPARENT);
+
+    // Draw a black shadow for readability.
+    SetTextColor(hdc, RGB(0, 0, 0));
+    RECT shadow = { rc.left + 1, rc.top + 1, rc.right + 1, rc.bottom + 1 };
+    DrawTextA(hdc, overlay, -1, &shadow, DT_LEFT | DT_TOP | DT_NOPREFIX);
+
+    SetTextColor(hdc, RGB(255, 255, 255));
+    DrawTextA(hdc, overlay, -1, &rc, DT_LEFT | DT_TOP | DT_NOPREFIX);
+}
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -78,6 +112,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         GetObject(bitmap, sizeof(bm), &bm);
         BitBlt(hdc, 0, 0, bm.bmWidth, bm.bmHeight, hDCMem, 0, 0, SRCCOPY);
+        drawOverlay(hdc);
 
         EndPaint(hwnd, &ps);
         ready = true;
@@ -133,13 +168,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         else if (wParam == 0x49)
         {
-            if (turbo && cpuArgs.iterations > 256)
+            if (turbo && cpuArgs.iterations > 16)
             {
-                cpuArgs.iterations -= 256;
+                cpuArgs.iterations -= 16;
             }
             else if (!turbo)
             {
-                cpuArgs.iterations += 256;
+                cpuArgs.iterations += 16;
             }
             last = true;
             render(hwnd);
