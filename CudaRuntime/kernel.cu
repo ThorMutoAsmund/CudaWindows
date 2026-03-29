@@ -10,6 +10,49 @@ using namespace std::chrono;
 
 #define THR 24
 
+__device__ unsigned int defaultPaletteColor(int idx)
+{
+    idx &= 127;
+    if (idx < 32)
+    {
+        return 0x000008 * idx;
+    }
+    if (idx < 64)
+    {
+        return (0x080800 * (idx - 32)) | 0xff;
+    }
+    if (idx < 96)
+    {
+        return (0x08 * (95 - idx)) | 0xffff00;
+    }
+    return (0x080800 * (127 - idx));
+}
+
+__device__ unsigned int lerpColor(unsigned int c0, unsigned int c1, double t)
+{
+    double clampedT = t;
+    if (clampedT < 0.0)
+    {
+        clampedT = 0.0;
+    }
+    else if (clampedT > 1.0)
+    {
+        clampedT = 1.0;
+    }
+
+    const double r0 = (double)((c0 >> 16) & 0xFF);
+    const double g0 = (double)((c0 >> 8) & 0xFF);
+    const double b0 = (double)(c0 & 0xFF);
+    const double r1 = (double)((c1 >> 16) & 0xFF);
+    const double g1 = (double)((c1 >> 8) & 0xFF);
+    const double b1 = (double)(c1 & 0xFF);
+
+    const unsigned int r = (unsigned int)(r0 + (r1 - r0) * clampedT);
+    const unsigned int g = (unsigned int)(g0 + (g1 - g0) * clampedT);
+    const unsigned int b = (unsigned int)(b0 + (b1 - b0) * clampedT);
+    return (r << 16) | (g << 8) | b;
+}
+
 __global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result, unsigned long* fastBuf)
 {
     unsigned long n;
@@ -127,27 +170,34 @@ __global__ void asyncMandel(CudaArgs* args, int border, unsigned long* result, u
 
             if (n < args->iterations)
             {
-                n = n % 128;
+                if (args->smoothColoring)
+                {
+                    // Continuous escape-time coloring based on final escaped magnitude.
+                    const double mag2 = r * r + i * i;
+                    // AI alternative
+                    //const double log_zn = log(mag2) * 0.5;
+                    //const double nu = log(log_zn / log(2.0)) / log(2.0);
+                    const double nu = 1.0 - exp((4.0 - mag2) * 0.25);
 
-                if (args->useCustomPalette)
-                {
-                    cols[colno] = args->palette[n];
-                }
-                else if (n < 32)
-                {
-                    cols[colno] = 0x000008 * n;
-                }
-                else if (n < 64)
-                {
-                    cols[colno] = (0x080800 * (n - 32)) | 0xff;
-                }
-                else if (n < 96)
-                {
-                    cols[colno] = (0x08 * (95 - n)) | 0xffff00;
+                    double smoothIter = (double)n + 1.0 - nu;
+                    if (smoothIter < 0.0)
+                    {
+                        smoothIter = 0.0;
+                    }
+
+                    const double base = floor(smoothIter);
+                    const int idx0 = ((int)base) & 127;
+                    const int idx1 = (idx0 + 1) & 127;
+                    const double t = smoothIter - base;
+
+                    const unsigned int c0 = args->useCustomPalette ? args->palette[idx0] : defaultPaletteColor(idx0);
+                    const unsigned int c1 = args->useCustomPalette ? args->palette[idx1] : defaultPaletteColor(idx1);
+                    cols[colno] = lerpColor(c0, c1, t);
                 }
                 else
                 {
-                    cols[colno] = (0x080800 * (127 - n));
+                    const int idx = ((int)n) & 127;
+                    cols[colno] = args->useCustomPalette ? args->palette[idx] : defaultPaletteColor(idx);
                 }
             }
             colno++;
